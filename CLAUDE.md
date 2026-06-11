@@ -15,15 +15,20 @@ There are no dependencies, no package.json, no bundler, and no tests.
 
 ## Git workflow
 
-Every meaningful change must be committed with a clear message and pushed immediately:
+**After every meaningful change, commit and push immediately.** Do not batch unrelated changes into one commit. The remote is `origin master` on GitHub (`judeimuede/sector-zero`).
 
 ```bash
-git add game.js          # (or index.html if changed)
-git commit -m "..."
+git add game.js          # (or index.html / CLAUDE.md if changed)
+git commit -m "short imperative summary of what and why"
 git push
 ```
 
-The remote is `origin master` on GitHub (`judeimuede/sector-zero`).
+Commit message rules:
+- Imperative mood: "Add spread shot powerup" not "Added" or "Adding"
+- First line ≤ 72 characters; describe *what changed and why*, not just what the code does
+- Always append `Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>`
+
+Always push in the same session the code was written. The goal is that GitHub always reflects the current state of the project so work is never lost and any commit can be restored.
 
 ## Architecture
 
