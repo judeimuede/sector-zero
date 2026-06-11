@@ -39,6 +39,155 @@ function circleCollide(ax, ay, ar, bx, by, br) {
 }
 
 // =============================================================================
+// AUDIO
+// =============================================================================
+
+let audio = null; // singleton set in Game constructor
+
+class AudioManager {
+  constructor() {
+    this.ctx = null;
+    this.masterGain = null;
+    this.muted = false;
+  }
+
+  _init() {
+    if (this.ctx) return;
+    try {
+      this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      this.masterGain = this.ctx.createGain();
+      this.masterGain.gain.value = 0.35;
+      this.masterGain.connect(this.ctx.destination);
+    } catch (_) {}
+  }
+
+  _resume() {
+    if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume();
+  }
+
+  _tone(freq, type, duration, vol, freqEnd) {
+    if (this.muted || !this.ctx) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t);
+    if (freqEnd != null) {
+      osc.frequency.exponentialRampToValueAtTime(Math.max(freqEnd, 1), t + duration);
+    }
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + duration);
+    osc.connect(g);
+    g.connect(this.masterGain);
+    osc.start(t);
+    osc.stop(t + duration + 0.02);
+  }
+
+  _noise(duration, vol, filterFreq) {
+    if (this.muted || !this.ctx) return;
+    const t = this.ctx.currentTime;
+    const sr = this.ctx.sampleRate;
+    const buf = this.ctx.createBuffer(1, Math.ceil(sr * duration), sr);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
+    const filt = this.ctx.createBiquadFilter();
+    filt.type = 'lowpass';
+    filt.frequency.value = filterFreq || 2000;
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + duration);
+    src.connect(filt);
+    filt.connect(g);
+    g.connect(this.masterGain);
+    src.start(t);
+    src.stop(t + duration + 0.02);
+  }
+
+  toggle() {
+    this.muted = !this.muted;
+    if (this.masterGain) this.masterGain.gain.value = this.muted ? 0 : 0.35;
+    return this.muted;
+  }
+
+  // Player fires
+  shoot() {
+    this._init(); this._resume();
+    this._tone(900, 'square', 0.06, 0.28, 180);
+    this._noise(0.05, 0.12, 4000);
+  }
+
+  // Bullet hits enemy but doesn't kill
+  enemyHit() {
+    this._init(); this._resume();
+    this._noise(0.07, 0.18, 1800);
+  }
+
+  // Enemy dies
+  enemyDeath() {
+    this._init(); this._resume();
+    this._noise(0.28, 0.45, 500);
+    this._tone(90, 'sawtooth', 0.28, 0.35, 28);
+  }
+
+  // Player takes a bullet hit
+  playerHurt() {
+    this._init(); this._resume();
+    this._tone(280, 'sawtooth', 0.14, 0.38, 90);
+    this._noise(0.12, 0.18, 900);
+  }
+
+  // Player dies
+  playerDeath() {
+    this._init(); this._resume();
+    this._noise(0.75, 0.75, 280);
+    this._tone(110, 'sawtooth', 0.65, 0.5, 22);
+    this._tone(220, 'sine', 0.4, 0.25, 45);
+  }
+
+  // Enemy shooter fires
+  enemyShoot() {
+    this._init(); this._resume();
+    this._tone(180, 'sawtooth', 0.08, 0.16, 80);
+    this._noise(0.06, 0.08, 1200);
+  }
+
+  // Collect a powerup (type-dependent jingle)
+  powerupCollect(type) {
+    this._init(); this._resume();
+    if (type === 'health') {
+      this._tone(523, 'sine', 0.12, 0.3);
+      setTimeout(() => { this._init(); this._tone(659, 'sine', 0.12, 0.3); }, 90);
+      setTimeout(() => { this._init(); this._tone(784, 'sine', 0.18, 0.28); }, 180);
+    } else if (type === 'nuke') {
+      this._noise(0.55, 0.65, 220);
+      this._tone(55, 'sawtooth', 0.55, 0.55, 18);
+    } else if (type === 'shield') {
+      this._tone(440, 'sine', 0.1, 0.25, 880);
+      setTimeout(() => { this._init(); this._tone(880, 'sine', 0.18, 0.25); }, 80);
+    } else if (type === 'rapidfire') {
+      this._tone(660, 'square', 0.06, 0.22, 880);
+      this._noise(0.06, 0.1, 3000);
+    } else if (type === 'speed') {
+      this._tone(440, 'sine', 0.08, 0.22, 660);
+      setTimeout(() => { this._init(); this._tone(880, 'sine', 0.1, 0.18); }, 70);
+    } else {
+      this._tone(440, 'triangle', 0.08, 0.22, 660);
+      this._tone(660, 'sine', 0.15, 0.2);
+    }
+  }
+
+  // Sector cleared
+  levelComplete() {
+    this._init(); this._resume();
+    [523, 659, 784, 1047].forEach((freq, i) => {
+      setTimeout(() => { this._init(); this._tone(freq, 'sine', 0.2, 0.3); }, i * 145);
+    });
+  }
+}
+
+// =============================================================================
 // POWERUP DEFINITIONS
 // =============================================================================
 
@@ -772,6 +921,7 @@ class Player {
     this.INVINCIBLE_DURATION = 0.65;
     this.muzzleFlash = 0;
     this.dead = false;
+    this.contactHurtTimer = 0;
 
     // Powerup tracking: type → remaining seconds
     this.activePowerups = {};
@@ -832,6 +982,7 @@ class Player {
         bullets.push(new Bullet(muzzleX, muzzleY, this.angle + 0.28, 'player'));
       }
       spawnMuzzleFlash(particles, muzzleX, muzzleY, this.angle);
+      if (audio) audio.shoot();
     }
 
     if (this.invincible > 0) this.invincible -= dt;
@@ -841,12 +992,18 @@ class Player {
     if (this.invincible > 0 || this.activePowerups.shield) return;
     this.hp = Math.max(0, this.hp - amount);
     this.invincible = this.INVINCIBLE_DURATION;
+    if (audio) audio.playerHurt();
     if (this.hp <= 0) this.dead = true;
   }
 
   takeContactDamage(amountPerSec, dt) {
     if (this.activePowerups.shield) return;
     this.hp = Math.max(0, this.hp - amountPerSec * dt);
+    this.contactHurtTimer -= dt;
+    if (this.contactHurtTimer <= 0) {
+      this.contactHurtTimer = 0.38;
+      if (audio) audio.playerHurt();
+    }
     if (this.hp <= 0) this.dead = true;
   }
 
@@ -928,8 +1085,10 @@ class Enemy {
     if (this.hp <= 0) {
       this.dead = true;
       if (particles) spawnDeathParticles(particles, this.x, this.y, this.color);
+      if (audio) audio.enemyDeath();
     } else {
       if (particles) spawnBloodPuff(particles, this.x, this.y, this.color);
+      if (audio) audio.enemyHit();
     }
   }
 
@@ -1087,6 +1246,7 @@ class Shooter extends Enemy {
       this.fireCooldown = this.fireRate;
       const aimAngle = this.angle + (Math.random() - 0.5) * 0.18;
       bullets.push(new Bullet(this.x, this.y, aimAngle, 'enemy'));
+      if (audio) audio.enemyShoot();
     }
   }
 
@@ -1174,8 +1334,10 @@ class InputManager {
     this.mouseX = CANVAS_W / 2;
     this.mouseY = CANVAS_H / 2;
     this.mouseDown = false;
+    this._muteJustPressed = false;
 
     window.addEventListener('keydown', e => {
+      if (!this._keys[e.code] && e.code === 'KeyM') this._muteJustPressed = true;
       this._keys[e.code] = true;
       if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Space'].includes(e.code)) {
         e.preventDefault();
@@ -1205,13 +1367,19 @@ class InputManager {
   get right() { return (this._keys['ArrowRight'] || this._keys['KeyD']) ? 1 : 0; }
   get up()    { return (this._keys['ArrowUp']    || this._keys['KeyW']) ? 1 : 0; }
   get down()  { return (this._keys['ArrowDown']  || this._keys['KeyS']) ? 1 : 0; }
+
+  consumeMuteToggle() {
+    const v = this._muteJustPressed;
+    this._muteJustPressed = false;
+    return v;
+  }
 }
 
 // =============================================================================
 // HUD
 // =============================================================================
 
-function drawHUD(ctx, player, score, levelIdx, killCount, killsToWin) {
+function drawHUD(ctx, player, score, levelIdx, killCount, killsToWin, audioMuted) {
   const PAD = 12;
 
   // HP bar
@@ -1258,11 +1426,14 @@ function drawHUD(ctx, player, score, levelIdx, killCount, killsToWin) {
   ctx.textAlign = 'center';
   ctx.fillText(`SCORE: ${score}`, CANVAS_W / 2, PAD + 16);
 
-  // Level name (top right)
+  // Level name + mute indicator (top right)
   ctx.fillStyle = '#ecf0f1';
   ctx.font = '14px monospace';
   ctx.textAlign = 'right';
   ctx.fillText(LEVELS[levelIdx].name, CANVAS_W - PAD, PAD + 14);
+  ctx.fillStyle = audioMuted ? '#e74c3c' : '#555';
+  ctx.font = '10px monospace';
+  ctx.fillText(audioMuted ? '[M] MUTED' : '[M] SFX', CANVAS_W - PAD, PAD + 30);
 
   // Kill progress bar (bottom center)
   const KILL_W = 220;
@@ -1544,6 +1715,9 @@ class Game {
 
     this.powerupSpawnTimer = 15;
     this.MAX_TIMED_POWERUPS = 3;
+    this.audioMuted = false;
+
+    audio = new AudioManager();
 
     canvas.addEventListener('click', e => this._onClick(e));
   }
@@ -1595,11 +1769,13 @@ class Game {
     if (this.player) {
       this.player.hp = Math.min(this.player.maxHp, this.player.hp + 30);
     }
+    if (audio) audio.levelComplete();
   }
 
   _applyPowerup(type) {
     const def = POWERUP_DEFS[type];
     spawnPickupParticles(this.particles, this.player.x, this.player.y, def.color);
+    if (audio) audio.powerupCollect(type);
 
     if (type === 'health') {
       this.player.hp = Math.min(this.player.maxHp, this.player.hp + 35);
@@ -1623,6 +1799,11 @@ class Game {
 
   update(dt) {
     this.totalTime += dt;
+
+    // Mute toggle works from any state
+    if (this.input.consumeMuteToggle() && audio) {
+      this.audioMuted = audio.toggle();
+    }
 
     if (this.state === STATE.MENU || this.state === STATE.GAME_OVER) return;
 
@@ -1733,6 +1914,7 @@ class Game {
     }
 
     if (this.player.dead) {
+      if (audio) audio.playerDeath();
       if (this.score > this.highScore) this.highScore = this.score;
       this.victory = false;
       this.state = STATE.GAME_OVER;
@@ -1796,7 +1978,7 @@ class Game {
 
     // HUD
     if (this.player && (this.state === STATE.PLAYING || this.state === STATE.LEVEL_COMPLETE)) {
-      drawHUD(ctx, this.player, this.score, levelIdx, this.killCount, level.killsToWin);
+      drawHUD(ctx, this.player, this.score, levelIdx, this.killCount, level.killsToWin, this.audioMuted);
     }
 
     // Crosshair (playing only)
