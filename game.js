@@ -44,20 +44,74 @@ function circleCollide(ax, ay, ar, bx, by, br) {
 
 let audio = null; // singleton set in Game constructor
 
+// =============================================================================
+// BGM SEQUENCER DATA
+// =============================================================================
+
+const BGM_BPM       = 132;
+const BGM_STEP_DUR  = (60 / BGM_BPM) / 2; // 8th-note duration in seconds (~0.227s)
+const BGM_STEPS     = 32;                  // 4 bars × 8 steps
+
+// Frequencies used in the track (A minor pentatonic)
+const P = {
+  _:  0,
+  E2: 82.41,  G2: 98,     A2: 110,
+  C3: 130.81, D3: 146.83, E3: 164.81, G3: 196,
+  A3: 220,
+  C4: 261.63, D4: 293.66, E4: 329.63, G4: 392,
+  A4: 440,
+  C5: 523.25, D5: 587.33, E5: 659.25, G5: 783.99,
+};
+
+// Lead melody — square wave
+const BGM_MELODY = [
+  // Bar 1 — driving opening riff
+  P.A4, P._,  P.C5, P._,  P.E5, P.D5, P.C5, P._,
+  // Bar 2 — answering phrase
+  P.A4, P.G4, P.E4, P._,  P.G4, P._,  P.A4, P._,
+  // Bar 3 — build to top
+  P.D5, P._,  P.E5, P.G5, P.E5, P._,  P.D5, P.C5,
+  // Bar 4 — resolution
+  P.A4, P.C5, P.A4, P._,  P.E4, P.G4, P.A4, P._,
+];
+
+// Bass line — sawtooth
+const BGM_BASS = [
+  P.A2, P._,  P._,  P.A2, P.E3, P._,  P._,  P._,
+  P.A2, P._,  P._,  P.A2, P.E3, P._,  P._,  P.G2,
+  P.D3, P._,  P._,  P.D3, P.A2, P._,  P._,  P._,
+  P.E3, P._,  P._,  P.E3, P.A2, P._,  P.E2, P._,
+];
+
+// Drums  (1 = hit, 0 = rest)
+const BGM_KICK  = [1,0,0,0, 0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,0, 0,0,0,0];
+const BGM_SNARE = [0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,0];
+const BGM_HIHAT = [1,0,1,0, 1,0,1,0, 1,0,1,0, 1,0,1,0, 1,0,1,0, 1,0,1,0, 1,0,1,0, 1,0,1,0];
+
 class AudioManager {
   constructor() {
     this.ctx = null;
     this.masterGain = null;
+    this._bgmGain = null;
     this.muted = false;
+    this._bgmRunning = false;
+    this._bgmTimer = null;
+    this._bgmStep = 0;
+    this._bgmNextTime = 0;
   }
 
   _init() {
     if (this.ctx) return;
     try {
       this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      // SFX bus
       this.masterGain = this.ctx.createGain();
       this.masterGain.gain.value = 0.35;
       this.masterGain.connect(this.ctx.destination);
+      // BGM bus (separate gain so we can balance independently)
+      this._bgmGain = this.ctx.createGain();
+      this._bgmGain.gain.value = 0.18;
+      this._bgmGain.connect(this.ctx.destination);
     } catch (_) {}
   }
 
@@ -108,6 +162,7 @@ class AudioManager {
   toggle() {
     this.muted = !this.muted;
     if (this.masterGain) this.masterGain.gain.value = this.muted ? 0 : 0.35;
+    if (this._bgmGain)   this._bgmGain.gain.value   = this.muted ? 0 : 0.18;
     return this.muted;
   }
 
@@ -184,6 +239,130 @@ class AudioManager {
     [523, 659, 784, 1047].forEach((freq, i) => {
       setTimeout(() => { this._init(); this._tone(freq, 'sine', 0.2, 0.3); }, i * 145);
     });
+  }
+
+  // ── BGM step sequencer ─────────────────────────────────────────────────────
+
+  startBGM() {
+    this._init();
+    if (!this.ctx || this._bgmRunning) return;
+    this._bgmRunning = true;
+    this._bgmStep = 0;
+    this._bgmNextTime = 0;
+    this._bgmTick();
+  }
+
+  stopBGM() {
+    this._bgmRunning = false;
+    clearTimeout(this._bgmTimer);
+    this._bgmTimer = null;
+    if (this._bgmGain && this.ctx) {
+      this._bgmGain.gain.setTargetAtTime(0, this.ctx.currentTime, 0.3);
+    }
+  }
+
+  _bgmTick() {
+    if (!this._bgmRunning || !this.ctx) return;
+    // Wait while context is suspended (browser autoplay policy)
+    if (this.ctx.state === 'suspended') {
+      this._bgmTimer = setTimeout(() => this._bgmTick(), 100);
+      return;
+    }
+    // Resync if clock jumped ahead (e.g. after suspension)
+    if (this._bgmNextTime < this.ctx.currentTime) {
+      this._bgmNextTime = this.ctx.currentTime + 0.05;
+    }
+    // Schedule notes that fall within the look-ahead window
+    while (this._bgmNextTime < this.ctx.currentTime + 0.14) {
+      this._scheduleBGMStep(this._bgmStep, this._bgmNextTime);
+      this._bgmStep = (this._bgmStep + 1) % BGM_STEPS;
+      this._bgmNextTime += BGM_STEP_DUR;
+    }
+    this._bgmTimer = setTimeout(() => this._bgmTick(), 28);
+  }
+
+  _scheduleBGMStep(step, t) {
+    if (!this.ctx || !this._bgmGain) return;
+    const mel = BGM_MELODY[step];
+    if (mel > 0) this._bgmOsc(mel, t, BGM_STEP_DUR * 0.82, 0.22, 'square');
+
+    const bas = BGM_BASS[step];
+    if (bas > 0) this._bgmOsc(bas, t, BGM_STEP_DUR * 1.85, 0.28, 'sawtooth');
+
+    if (BGM_KICK[step])  this._bgmKick(t);
+    if (BGM_SNARE[step]) this._bgmSnare(t);
+    if (BGM_HIHAT[step]) this._bgmHihat(t);
+  }
+
+  _bgmOsc(freq, t, dur, vol, type) {
+    const osc = this.ctx.createOscillator();
+    const g   = this.ctx.createGain();
+    osc.type = type;
+    osc.frequency.value = freq;
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    osc.connect(g);
+    g.connect(this._bgmGain);
+    osc.start(t);
+    osc.stop(t + dur + 0.01);
+  }
+
+  _bgmKick(t) {
+    const osc = this.ctx.createOscillator();
+    const g   = this.ctx.createGain();
+    osc.frequency.setValueAtTime(160, t);
+    osc.frequency.exponentialRampToValueAtTime(0.01, t + 0.13);
+    g.gain.setValueAtTime(0.9, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.13);
+    osc.connect(g);
+    g.connect(this._bgmGain);
+    osc.start(t);
+    osc.stop(t + 0.14);
+  }
+
+  _bgmSnare(t) {
+    const dur  = 0.11;
+    const sr   = this.ctx.sampleRate;
+    const buf  = this.ctx.createBuffer(1, Math.ceil(sr * dur), sr);
+    const d    = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    const src  = this.ctx.createBufferSource();
+    src.buffer = buf;
+    const filt = this.ctx.createBiquadFilter();
+    filt.type  = 'bandpass';
+    filt.frequency.value = 2200;
+    const g    = this.ctx.createGain();
+    g.gain.setValueAtTime(0.38, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    src.connect(filt); filt.connect(g); g.connect(this._bgmGain);
+    src.start(t); src.stop(t + dur + 0.01);
+    // Body tone
+    const osc2 = this.ctx.createOscillator();
+    const g2   = this.ctx.createGain();
+    osc2.frequency.setValueAtTime(220, t);
+    osc2.frequency.exponentialRampToValueAtTime(100, t + 0.05);
+    g2.gain.setValueAtTime(0.18, t);
+    g2.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
+    osc2.connect(g2); g2.connect(this._bgmGain);
+    osc2.start(t); osc2.stop(t + 0.06);
+  }
+
+  _bgmHihat(t) {
+    const dur  = 0.04;
+    const sr   = this.ctx.sampleRate;
+    const buf  = this.ctx.createBuffer(1, Math.ceil(sr * dur), sr);
+    const d    = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    const src  = this.ctx.createBufferSource();
+    src.buffer = buf;
+    const filt = this.ctx.createBiquadFilter();
+    filt.type  = 'highpass';
+    filt.frequency.value = 7500;
+    const g    = this.ctx.createGain();
+    g.gain.setValueAtTime(0.14, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    src.connect(filt); filt.connect(g); g.connect(this._bgmGain);
+    src.start(t); src.stop(t + dur + 0.01);
   }
 }
 
@@ -1718,6 +1897,7 @@ class Game {
     this.audioMuted = false;
 
     audio = new AudioManager();
+    audio.startBGM();
 
     canvas.addEventListener('click', e => this._onClick(e));
   }
